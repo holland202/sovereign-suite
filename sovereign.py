@@ -111,7 +111,7 @@ class Potential:
         rng = np.random.default_rng(seed)
         self.truth = rng.normal(0, 1, dim)
         self.truth /= np.linalg.norm(self.truth)
-        self.noise = 0.1
+        self.noise = 0.05 # Lower noise floor
     
     def grad(self, X: np.ndarray) -> np.ndarray:
         d = X - self.truth
@@ -255,7 +255,7 @@ class SovereignCore:
             
             if not self.state.check_topology():
                 print(f"\n[VERITAS] Topology breach at step {i}")
-                self.state.p *= 0.5
+                self.state.p = -self.state.p + np.random.normal(0, 0.5, self.cfg.dim) # Inject escape entropy
                 continue
             
             self.integrator.step(self.state, force, gate, aT)
@@ -284,7 +284,7 @@ class SovereignCore:
         print("=" * 50)
         print(f"Steps: {self.state.step} | Commits: {self.thermo.commits} | "
               f"Rejects: {self.thermo.rejects} | Topo violations: {self.state.violations}")
-        print(f"Final V: {self.Vs[-1]:.6f} | Dist to truth: "
+        print(f"Final V: {(self.Vs[-1] if self.Vs else 0.0):.6f} | Dist to truth: "
               f"{np.linalg.norm(self.state.q - self.pot.truth):.6f}")
         print(f"Telemetry rows: {self.cursor.execute('SELECT COUNT(*) FROM telemetry').fetchone()[0]}")
         print("=" * 50)

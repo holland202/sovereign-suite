@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Phase 2C Governance Toolkit — Master Guide
 **Complete Implementation of Sovereign Logic Core on Galaxy S25 Ultra**
 
@@ -650,6 +649,4 @@ python3 smoke_test_2c.py --cycles 20 --log-file /tmp/governance_metrics.jsonl
 ---
 
 **All documentation files included. Start anywhere, reference as needed. Good luck.** 🎯
-=======
 # polytope-explorer
->>>>>>> 36802fc62ef170aef601367b7dd9adc592943e96
