@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """
-Sovereign Suite v0.2.0 — Deterministic Physics-Grounded Control Plane
+Sovereign Suite v0.2.1 — Deterministic Physics-Grounded Control Plane
 Runs locally on Snapdragon 8 Elite (Samsung S25 Ultra via Termux).
 
 Core dynamics: symplectic integration on a thermodynamically gated logic manifold.
+
+CHANGELOG v0.2.0 → v0.2.1:
+- Fixed thermal cold-amplification bug: a(T) no longer scales momentum.
+  Previously exp(-η(T-38.5)) gave aT=35× when T=15°C, causing K≈8000.
+  Now aT is telemetry-only; dynamics are temperature-independent below 42°C.
+- Added physical damping (γ=0.05) to Verlet integrator force term for
+  monotonic convergence without post-step friction.
+- ATOMIC_REDUCTION triggers at T ≥ 42°C (unchanged behavior, now correct).
 """
 
 import os
@@ -27,20 +35,22 @@ DIM = len(TRUTH)
 MASS = 1.0
 DT = 0.01
 ETA_THERMAL = 0.15
-TEMP_CRITICAL = 42.0
-TEMP_NOMINAL = 38.5
+TEMP_CRITICAL = 42.0          # ATOMIC_REDUCTION threshold (°C)
+TEMP_NOMINAL = 38.5           # a(T) reference point for telemetry
 TOPO_TOLERANCE = 1e-2
 TOPO_SAMPLE_EVERY = 5
 COOLING_THRESHOLD = 10
 COOLING_PERTURBATION = 0.5
 MAX_STEPS = 2000
-FRICTION = 0.05
+GAMMA_DAMP = 0.05             # Physical damping in Verlet force
 DB_PATH = Path.home() / "sovereign_telemetry.db"
 
 # ---------------------------------------------------------------------------
 # THERMAL BINDING
 # ---------------------------------------------------------------------------
 class ThermalBinding:
+    """Reads hardware thermal zones on Android; falls back to simulation."""
+
     def __init__(self):
         self.zones = []
         self._sim_temp = 35.0
@@ -62,6 +72,7 @@ class ThermalBinding:
             self._sim_temp += 0.01 * random.gauss(0, 1)
             self._sim_temp = max(30.0, min(self._sim_temp, 45.0))
             return self._sim_temp
+
         temps = []
         for zf in self.zones:
             try:
@@ -73,9 +84,11 @@ class ThermalBinding:
         return sum(temps) / len(temps) if temps else self._sim_temp
 
 # ---------------------------------------------------------------------------
-# POTENTIAL FIELD (v0.2.0: noise-free)
+# POTENTIAL FIELD
 # ---------------------------------------------------------------------------
 class Potential:
+    """Harmonic well centered at TRUTH. Clean quadratic — no noise."""
+
     def __init__(self, truth):
         self.truth = truth
 
@@ -87,9 +100,14 @@ class Potential:
         return x - self.truth
 
 # ---------------------------------------------------------------------------
-# TOPOLOGY CHECKER (v0.2.0: sampled, with cooling)
+# TOPOLOGY CHECKER
 # ---------------------------------------------------------------------------
 class TopologyChecker:
+    """
+    Approximates β₁ = 0: no non-contractible loops.
+    Samples history every N steps; cooling reset after consecutive breaches.
+    """
+
     def __init__(self, tolerance=TOPO_TOLERANCE):
         self.tol = tolerance
         self.history = []
@@ -127,9 +145,14 @@ class TopologyChecker:
         self.consecutive_breaches = 0
 
 # ---------------------------------------------------------------------------
-# THERMODYNAMIC GATE (v0.2.0: strict dH < 0)
+# THERMODYNAMIC GATE
 # ---------------------------------------------------------------------------
 class ThermodynamicGate:
+    """
+    Gate opens ONLY if ΔH < 0 (strict potential decrease).
+    ΔG is computed for telemetry but never overrides the ΔH criterion.
+    """
+
     def evaluate(self, V_new, V_old, x_new, x_old, T):
         dH = V_new - V_old
         dS = 0.05 * np.linalg.norm(x_new - x_old) / (1.0 + np.linalg.norm(x_old)) if x_old is not None else 0.0
@@ -144,6 +167,8 @@ class ThermodynamicGate:
 # TELEMETRY (SQLite)
 # ---------------------------------------------------------------------------
 class Telemetry:
+    """File-first memory. BLOB state vectors."""
+
     def __init__(self, db_path):
         self.conn = sqlite3.connect(str(db_path))
         self._init_schema()
@@ -182,19 +207,25 @@ class Telemetry:
         self.conn.close()
 
 # ---------------------------------------------------------------------------
-# INTEGRATOR: Velocity Verlet
+# INTEGRATOR: Damped Velocity Verlet
 # ---------------------------------------------------------------------------
-class VerletIntegrator:
-    def __init__(self, mass, dt, potential):
+class DampedVerletIntegrator:
+    """
+    Velocity Verlet with physical damping γ in the force term.
+    F = -∇V - γp  ensures monotonic convergence to the potential minimum.
+    Damping is a physical property, not post-step friction.
+    """
+    def __init__(self, mass, dt, potential, gamma):
         self.m = mass
         self.dt = dt
         self.V = potential
+        self.gamma = gamma
 
     def step(self, x, p):
-        F = -self.V.grad(x)
+        F = -self.V.grad(x) - self.gamma * p
         p_half = p + 0.5 * self.dt * F
         x_new = x + (p_half / self.m) * self.dt
-        F_new = -self.V.grad(x_new)
+        F_new = -self.V.grad(x_new) - self.gamma * p_half
         p_new = p_half + 0.5 * self.dt * F_new
         return x_new, p_new
 
@@ -208,7 +239,7 @@ class SovereignKernel:
         self.topo = TopologyChecker()
         self.gate = ThermodynamicGate()
         self.telemetry = Telemetry(DB_PATH)
-        self.integrator = VerletIntegrator(MASS, DT, self.potential)
+        self.integrator = DampedVerletIntegrator(MASS, DT, self.potential, GAMMA_DAMP)
 
         self.x = np.random.randn(DIM).astype(np.float64)
         self.p = np.zeros(DIM, dtype=np.float64)
@@ -233,10 +264,12 @@ class SovereignKernel:
         K = 0.5 * np.dot(self.p, self.p) / MASS
         H = self.V_old + K
         T = self.thermal.read()
-        aT = math.exp(-ETA_THERMAL * (T - TEMP_NOMINAL)) if T < TEMP_CRITICAL else 0.0
+        aT_telemetry = 1.0 if T < TEMP_NOMINAL else math.exp(-ETA_THERMAL * (T - TEMP_NOMINAL))
+        if T >= TEMP_CRITICAL:
+            aT_telemetry = 0.0
         self.telemetry.persist(
             self.steps, T, self.V_old, K, H, True,
-            self.topo.total_violations, aT, self.x
+            self.topo.total_violations, aT_telemetry, self.x
         )
 
     def _thermal_collapse(self, T):
@@ -244,19 +277,20 @@ class SovereignKernel:
             print(f"[ATOMIC_REDUCTION] T={T:.2f}°C ≥ {TEMP_CRITICAL}°C. HALT.")
             self.atomic_reduction = True
             return 0.0
-        aT = math.exp(-ETA_THERMAL * (T - TEMP_NOMINAL))
-        return aT
+        # v0.2.1: aT is telemetry-only. No momentum scaling.
+        aT_telemetry = 1.0 if T < TEMP_NOMINAL else math.exp(-ETA_THERMAL * (T - TEMP_NOMINAL))
+        return aT_telemetry
 
     def run(self):
         print("=" * 60)
-        print("SOVEREIGN SUITE v0.2.0")
+        print("SOVEREIGN SUITE v0.2.1")
         print("Symplectic logic manifold | Thermodynamic gate | Topology bound")
         print("=" * 60)
         print(f"Truth target: {TRUTH}")
         print(f"Initial state: {self.x}")
         print(f"Initial V: {self.V_old:.6f}")
-        print(f"Topology tolerance: {TOPO_TOLERANCE} | Sample every: {TOPO_SAMPLE_EVERY}")
-        print(f"Cooling threshold: {COOLING_THRESHOLD}")
+        print(f"Damping γ: {GAMMA_DAMP} | Topology tolerance: {TOPO_TOLERANCE}")
+        print(f"Sample every: {TOPO_SAMPLE_EVERY} | Cooling threshold: {COOLING_THRESHOLD}")
         print("-" * 60)
 
         for loop_idx in range(MAX_STEPS):
@@ -293,7 +327,8 @@ class SovereignKernel:
                 self.p *= 0.3
                 continue
 
-            self.p = p_prop * aT * (1.0 - FRICTION)
+            # v0.2.1: Pure physics. No thermal momentum scaling.
+            self.p = p_prop
             self.x = x_prop
             self.V_old = V_prop
             self.x_old = self.x.copy()
