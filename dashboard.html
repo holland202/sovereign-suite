@@ -72,7 +72,6 @@ function drawLine(canvas, data, color, minVal, maxVal) {
     }
     canvas.stroke();
     
-    // Fill area
     canvas.lineTo(w, h);
     canvas.lineTo(0, h);
     canvas.closePath();
@@ -101,7 +100,6 @@ function fetchData() {
             drawLine(ctx.kin, kins, '#60a5fa', 0, 2);
             drawLine(ctx.aT, aTs, '#fbbf24', 0, 1);
             
-            // Update status
             document.getElementById('step').textContent = `Step: ${latest.step}`;
             document.getElementById('temp').textContent = `T: ${latest.temperature.toFixed(2)}°C`;
             
@@ -114,7 +112,6 @@ function fetchData() {
             if (latest.gate) { gate.className = 'commit'; gate.textContent = 'COMMIT'; }
             else { gate.className = 'reject'; gate.textContent = 'REJECT'; }
             
-            // Gate history dots
             const gh = document.getElementById('gate-history');
             gh.innerHTML = '';
             gates.slice(-200).forEach(g => {

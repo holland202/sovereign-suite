@@ -46,9 +46,12 @@ def gauge(value, max_val, width=40, label="", color_fn=None):
     return f"{label:12s} │{bar}│ {ratio*100:5.1f}%"
 
 def thermal_color(bar, ratio):
-    if ratio < 0.5: return GREEN + bar + RESET
-    elif ratio < 0.8: return YELLOW + bar + RESET
-    else: return RED + bar + RESET
+    if ratio < 0.5:
+        return GREEN + bar + RESET
+    elif ratio < 0.8:
+        return YELLOW + bar + RESET
+    else:
+        return RED + bar + RESET
 
 class Dashboard:
     def __init__(self, db_path="sovereign_telemetry.db", rate=0.5):
