@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sovereign Dashboard</title>
+<style>
+body { background: #0a0a0f; color: #e0e0e0; font-family: monospace; margin: 0; padding: 20px; }
+#header { text-align: center; color: #00d4ff; font-size: 24px; margin-bottom: 20px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; }
+.card { background: #12121a; border: 1px solid #1e1e2e; border-radius: 8px; padding: 15px; }
+.card h3 { color: #00d4ff; margin: 0 0 10px 0; font-size: 14px; }
+canvas { width: 100%; height: 150px; background: #0a0a0f; border-radius: 4px; }
+.status { display: flex; justify-content: space-between; margin-top: 10px; font-size: 12px; }
+.status span { padding: 4px 12px; border-radius: 4px; }
+.commit { background: #1a4a1a; color: #4aff4a; }
+.reject { background: #4a1a1a; color: #ff4a4a; }
+.nominal { background: #1a3a1a; color: #4aff4a; }
+.warm { background: #3a3a1a; color: #ffff4a; }
+.critical { background: #4a1a1a; color: #ff4a4a; }
+#gate-history { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 10px; }
+.gate-dot { width: 8px; height: 8px; border-radius: 50%; }
+.gate-pass { background: #4aff4a; }
+.gate-fail { background: #ff4a4a; }
+</style>
+</head>
+<body>
+<div id="header">SOVEREIGN CONTROL PLANE v0.1.2</div>
+<div class="grid">
+<div class="card"><h3>Temperature T(t)</h3><canvas id="tempChart"></canvas></div>
+<div class="card"><h3>Potential V(X)</h3><canvas id="potChart"></canvas></div>
+<div class="card"><h3>Kinetic Energy K(t)</h3><canvas id="kinChart"></canvas></div>
+<div class="card"><h3>Thermal Collapse a(T)</h3><canvas id="aTChart"></canvas></div>
+</div>
+<div class="card" style="max-width: 1200px; margin: 20px auto;">
+<h3>Gate History (last 200 steps)</h3>
+<div id="gate-history"></div>
+<div class="status">
+<span id="step">Step: ---</span>
+<span id="temp">T: ---°C</span>
+<span id="thermal" class="nominal">NOMINAL</span>
+<span id="gate" class="commit">COMMIT</span>
+</div>
+</div>
+<script>
+const ctx = {
+    temp: document.getElementById('tempChart').getContext('2d'),
+    pot: document.getElementById('potChart').getContext('2d'),
+    kin: document.getElementById('kinChart').getContext('2d'),
+    aT: document.getElementById('aTChart').getContext('2d')
+};
+
+function drawLine(canvas, data, color, minVal, maxVal) {
+    const w = canvas.canvas.width = canvas.canvas.offsetWidth;
+    const h = canvas.canvas.height = canvas.canvas.offsetHeight;
+    canvas.clearRect(0, 0, w, h);
+    if (data.length < 2) return;
+    
+    const mn = minVal !== undefined ? minVal : Math.min(...data);
+    const mx = maxVal !== undefined ? maxVal : Math.max(...data);
+    const range = mx - mn || 1;
+    
+    canvas.strokeStyle = color;
+    canvas.lineWidth = 2;
+    canvas.beginPath();
+    
+    for (let i = 0; i < data.length; i++) {
+        const x = (i / (data.length - 1)) * w;
+        const y = h - ((data[i] - mn) / range) * h;
+        if (i === 0) canvas.moveTo(x, y);
+        else canvas.lineTo(x, y);
+    }
+    canvas.stroke();
+    
+    // Fill area
+    canvas.lineTo(w, h);
+    canvas.lineTo(0, h);
+    canvas.closePath();
+    canvas.fillStyle = color + '20';
+    canvas.fill();
+}
+
+let history = [];
+
+function fetchData() {
+    fetch('telemetry.json')
+        .then(r => r.json())
+        .then(data => {
+            if (!data || data.length === 0) return;
+            history = data;
+            const latest = data[data.length - 1];
+            
+            const temps = data.map(d => d.temperature);
+            const pots = data.map(d => d.potential);
+            const kins = data.map(d => d.kinetic);
+            const aTs = data.map(d => d.aT);
+            const gates = data.map(d => d.gate);
+            
+            drawLine(ctx.temp, temps, '#ff6b6b', 30, 50);
+            drawLine(ctx.pot, pots, '#c084fc', 0, 5);
+            drawLine(ctx.kin, kins, '#60a5fa', 0, 2);
+            drawLine(ctx.aT, aTs, '#fbbf24', 0, 1);
+            
+            // Update status
+            document.getElementById('step').textContent = `Step: ${latest.step}`;
+            document.getElementById('temp').textContent = `T: ${latest.temperature.toFixed(2)}°C`;
+            
+            const thermal = document.getElementById('thermal');
+            if (latest.temperature < 38.5) { thermal.className = 'nominal'; thermal.textContent = 'NOMINAL'; }
+            else if (latest.temperature < 42) { thermal.className = 'warm'; thermal.textContent = 'WARM'; }
+            else { thermal.className = 'critical'; thermal.textContent = 'CRITICAL'; }
+            
+            const gate = document.getElementById('gate');
+            if (latest.gate) { gate.className = 'commit'; gate.textContent = 'COMMIT'; }
+            else { gate.className = 'reject'; gate.textContent = 'REJECT'; }
+            
+            // Gate history dots
+            const gh = document.getElementById('gate-history');
+            gh.innerHTML = '';
+            gates.slice(-200).forEach(g => {
+                const dot = document.createElement('div');
+                dot.className = 'gate-dot ' + (g ? 'gate-pass' : 'gate-fail');
+                gh.appendChild(dot);
+            });
+        })
+        .catch(() => {});
+}
+
+setInterval(fetchData, 500);
+fetchData();
+</script>
+</body>
+</html>
