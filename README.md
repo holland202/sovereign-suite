@@ -72,7 +72,7 @@ The **Veritas Constraint** enforces β₁ = β₂ = 0 (simply connected manifold
 
 | File | Description |
 |------|-------------|
-| `sovereign.py` | Main control plane (v0.1.2) |
+| `sovereign.py` | Main control plane (v0.2.0) |
 | `sovereign_dashboard.py` | ANSI terminal dashboard (real-time telemetry) |
 | `dashboard.html` | Browser-based Canvas dashboard with live charts |
 | `export_telemetry.py` | SQLite-to-JSON exporter for HTML dashboard |

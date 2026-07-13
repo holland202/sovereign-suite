@@ -1,343 +1,334 @@
 #!/usr/bin/env python3
 """
-sovereign.py — Sovereign Control Plane v0.1.2
-Fixed: topology breach storm, clean harmonic convergence
-Run: python3 sovereign.py
-Requires: numpy (pip install numpy)
+Sovereign Suite v0.2.0 — Deterministic Physics-Grounded Control Plane
+Runs locally on Snapdragon 8 Elite (Samsung S25 Ultra via Termux).
+
+Core dynamics: symplectic integration on a thermodynamically gated logic manifold.
 """
 
-import os, sys, math, sqlite3, signal, time
+import os
+import sys
+import sqlite3
+import struct
+import hashlib
+import signal
+import random
+import math
+import time
+from pathlib import Path
+
 import numpy as np
-from dataclasses import dataclass
-from collections import deque
-from typing import Optional, Tuple
 
-# ─── CONFIG ─────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------------------------------
+TRUTH = np.array([3.14159265, 2.71828182, 1.41421356, 1.61803398], dtype=np.float64)
+DIM = len(TRUTH)
+MASS = 1.0
+DT = 0.01
+ETA_THERMAL = 0.15
+TEMP_CRITICAL = 42.0
+TEMP_NOMINAL = 38.5
+TOPO_TOLERANCE = 1e-2
+TOPO_SAMPLE_EVERY = 5
+COOLING_THRESHOLD = 10
+COOLING_PERTURBATION = 0.5
+MAX_STEPS = 2000
+FRICTION = 0.05
+DB_PATH = Path.home() / "sovereign_telemetry.db"
 
-@dataclass
-class Config:
-    dim: int = 64
-    mass: float = 1.0
-    dt: float = 0.01
-    eta: float = 2.0
-    temp_threshold: float = 38.5
-    temp_critical: float = 42.0
-    dH: float = -0.1
-    dS: float = 0.02
-    max_steps: int = 2000
-    log_interval: int = 100
-    db_path: str = "sovereign_telemetry.db"
-    persist_every: int = 10
-
-# ─── THERMAL MONITOR ────────────────────────────────────────────────────
-
-class ThermalMonitor:
-    ZONES = [
-        "/sys/class/thermal/thermal_zone0/temp",
-        "/sys/class/thermal/thermal_zone1/temp",
-        "/sys/class/thermal/thermal_zone2/temp",
-        "/sys/class/power_supply/battery/temp",
-    ]
-    
+# ---------------------------------------------------------------------------
+# THERMAL BINDING
+# ---------------------------------------------------------------------------
+class ThermalBinding:
     def __init__(self):
-        self.sim = not self._is_android()
+        self.zones = []
         self._sim_temp = 35.0
-        self._path = self._find_zone()
-        if self._path:
-            ttype = self._read_type()
-            print(f"[Thermal] Hardware bound: {self._path} ({ttype})")
+        base = Path("/sys/class/thermal")
+        if base.exists():
+            for zone_dir in sorted(base.glob("thermal_zone*")):
+                temp_file = zone_dir / "temp"
+                if temp_file.exists():
+                    self.zones.append(temp_file)
+            if self.zones:
+                print(f"[Thermal] Hardware bound: {self.zones[0]} ({len(self.zones)} zones)")
+            else:
+                print("[Thermal] No hardware zones found; using simulation.")
         else:
-            print("[Thermal] Simulation mode")
-    
-    def _is_android(self) -> bool:
-        return ("ANDROID_ROOT" in os.environ or
-                os.path.exists("/system/bin/app_process") or
-                "termux" in os.environ.get("PREFIX", "").lower())
-    
-    def _find_zone(self) -> Optional[str]:
-        for p in self.ZONES:
-            if os.path.exists(p):
-                return p
-        return None
-    
-    def _read_type(self) -> str:
-        tpath = self._path.replace("/temp", "/type")
-        try:
-            with open(tpath) as f:
-                return f.read().strip()
-        except:
-            return "unknown"
-    
-    def read(self) -> float:
-        if self.sim or not self._path:
-            self._sim_temp += 0.005 * (1 + 0.1 * np.random.randn())
+            print("[Thermal] /sys/class/thermal absent; using simulation.")
+
+    def read(self):
+        if not self.zones:
+            self._sim_temp += 0.01 * random.gauss(0, 1)
             self._sim_temp = max(30.0, min(self._sim_temp, 45.0))
             return self._sim_temp
-        try:
-            with open(self._path) as f:
-                v = int(f.read().strip())
-            return v / 10.0 if "battery" in self._path else v / 1000.0
-        except:
-            self.sim = True
-            return self.read()
+        temps = []
+        for zf in self.zones:
+            try:
+                raw = zf.read_text().strip()
+                t_millideg = int(raw)
+                temps.append(t_millideg / 1000.0)
+            except (ValueError, OSError):
+                continue
+        return sum(temps) / len(temps) if temps else self._sim_temp
 
-# ─── THERMODYNAMIC FUNCTOR ──────────────────────────────────────────────
-
-class ThermoFunctor:
-    def __init__(self, cfg: Config, monitor: ThermalMonitor):
-        self.cfg = cfg
-        self.mon = monitor
-        self.commits = 0
-        self.rejects = 0
-    
-    def compute(self) -> Tuple[float, float, bool, float]:
-        T = self.mon.read()
-        if T <= self.cfg.temp_threshold:
-            aT = 1.0
-        else:
-            aT = math.exp(-self.cfg.eta * (T - self.cfg.temp_threshold))
-        dG = self.cfg.dH - T * self.cfg.dS
-        gate = dG < 0
-        if gate:
-            self.commits += 1
-        else:
-            self.rejects += 1
-        return aT, dG, gate, T
-
-# ─── EPISTEMIC POTENTIAL ────────────────────────────────────────────────
-
+# ---------------------------------------------------------------------------
+# POTENTIAL FIELD (v0.2.0: noise-free)
+# ---------------------------------------------------------------------------
 class Potential:
-    """Clean harmonic well. Guaranteed convex, simply-connected."""
-    def __init__(self, dim: int, seed: int = 42):
-        rng = np.random.default_rng(seed)
-        self.truth = rng.normal(0, 1, dim)
-        self.truth /= np.linalg.norm(self.truth)
-    
-    def grad(self, X: np.ndarray) -> np.ndarray:
-        return X - self.truth
-    
-    def V(self, X: np.ndarray) -> float:
-        return 0.5 * np.linalg.norm(X - self.truth) ** 2
+    def __init__(self, truth):
+        self.truth = truth
 
-# ─── MANIFOLD STATE ─────────────────────────────────────────────────────
+    def value(self, x):
+        diff = x - self.truth
+        return 0.5 * np.dot(diff, diff)
 
-class State:
-    def __init__(self, cfg: Config, pot: Potential):
-        self.cfg = cfg
-        self.pot = pot
-        rng = np.random.default_rng(42)
-        self.q = rng.normal(0, 0.5, cfg.dim)
-        self.p = np.zeros(cfg.dim)
-        self.history = deque(maxlen=1000)
-        self.violations = 0
+    def grad(self, x):
+        return x - self.truth
+
+# ---------------------------------------------------------------------------
+# TOPOLOGY CHECKER (v0.2.0: sampled, with cooling)
+# ---------------------------------------------------------------------------
+class TopologyChecker:
+    def __init__(self, tolerance=TOPO_TOLERANCE):
+        self.tol = tolerance
+        self.history = []
         self.consecutive_breaches = 0
-        self.step = 0
-    
-    def check_topology(self) -> bool:
-        if len(self.history) < 10:
-            self.history.append(self.q.copy())
+        self.total_violations = 0
+        self.step_counter = 0
+
+    def _hash_state(self, x):
+        quantized = np.round(x / self.tol).astype(np.int64)
+        return hashlib.sha256(quantized.tobytes()).hexdigest()[:16]
+
+    def check(self, x, potential):
+        self.step_counter += 1
+        if self.step_counter % TOPO_SAMPLE_EVERY != 0:
             return True
-        
-        for past in self.history:
-            if np.linalg.norm(self.q - past) < 1e-3:
-                if self.pot.V(self.q) >= self.pot.V(past) - 1e-6:
-                    self.violations += 1
-                    self.consecutive_breaches += 1
-                    if self.consecutive_breaches >= 3:
-                        self._recover()
-                    return False
-        
+        h = self._hash_state(x)
+        for prev_h, prev_V in self.history:
+            if h == prev_h and potential >= prev_V:
+                self.consecutive_breaches += 1
+                self.total_violations += 1
+                if self.consecutive_breaches >= COOLING_THRESHOLD:
+                    print(f"  [Topology] Cooling triggered after {self.consecutive_breaches} breaches.")
+                    self.history.clear()
+                    self.consecutive_breaches = 0
+                    return "COOLING"
+                return False
+        self.history.append((h, potential))
+        if len(self.history) > 200:
+            self.history.pop(0)
         self.consecutive_breaches = 0
-        self.history.append(self.q.copy())
         return True
-    
-    def _recover(self):
-        """Break a non-contractible loop by perturbing state and clearing history."""
-        rng = np.random.default_rng()
-        perturb = rng.normal(0, 0.05, self.cfg.dim)
-        self.q += perturb
-        self.p *= 0.1
+
+    def reset(self):
         self.history.clear()
         self.consecutive_breaches = 0
-    
-    def K(self) -> float:
-        return 0.5 * np.dot(self.p, self.p) / self.cfg.mass
 
-# ─── SYMPLECTIC INTEGRATOR ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# THERMODYNAMIC GATE (v0.2.0: strict dH < 0)
+# ---------------------------------------------------------------------------
+class ThermodynamicGate:
+    def evaluate(self, V_new, V_old, x_new, x_old, T):
+        dH = V_new - V_old
+        dS = 0.05 * np.linalg.norm(x_new - x_old) / (1.0 + np.linalg.norm(x_old)) if x_old is not None else 0.0
+        dG = dH - T * dS
+        gate_open = dH < 0
+        return gate_open, dG, dH, dS
 
-class Integrator:
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-    
-    def step(self, state: State, force: np.ndarray, gate: bool, aT: float):
-        dt = self.cfg.dt
-        m = self.cfg.mass
-        
-        if not gate or aT < 1e-12:
-            F = np.zeros_like(force)
-            state.p *= 0.99
-        else:
-            F = force * aT
-        
-        p_half = state.p + 0.5 * dt * F
-        state.q = state.q + dt * p_half / m
-        state.p = p_half + 0.5 * dt * F
-        state.step += 1
+    def reset(self):
+        pass
 
-# ─── SOVEREIGN CORE ─────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# TELEMETRY (SQLite)
+# ---------------------------------------------------------------------------
+class Telemetry:
+    def __init__(self, db_path):
+        self.conn = sqlite3.connect(str(db_path))
+        self._init_schema()
 
-class SovereignCore:
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-        self.thermal = ThermalMonitor()
-        self.thermo = ThermoFunctor(cfg, self.thermal)
-        self.pot = Potential(cfg.dim)
-        self.state = State(cfg, self.pot)
-        self.integrator = Integrator(cfg)
-        
-        self.conn = sqlite3.connect(cfg.db_path)
-        self.cursor = self.conn.cursor()
-        self._init_db()
-        
-        signal.signal(signal.SIGINT, self._shutdown)
-        signal.signal(signal.SIGTERM, self._shutdown)
-        
-        self.Vs = []
-        self.Ks = []
-        self.Ts = []
-        self.gates = []
-    
-    def _init_db(self):
-        self.cursor.execute("""
+    def _init_schema(self):
+        self.conn.execute("""
             CREATE TABLE IF NOT EXISTS telemetry (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                step INTEGER NOT NULL,
-                timestamp REAL NOT NULL,
-                temperature REAL NOT NULL,
-                potential REAL NOT NULL,
-                kinetic REAL NOT NULL,
-                hamiltonian REAL NOT NULL,
-                gate INTEGER NOT NULL,
-                violations INTEGER NOT NULL,
-                aT REAL NOT NULL,
-                state_norm REAL NOT NULL,
+                step INTEGER PRIMARY KEY,
+                timestamp REAL,
+                temperature REAL,
+                potential REAL,
+                kinetic REAL,
+                hamiltonian REAL,
+                gate_pass INTEGER,
+                topo_violations INTEGER,
+                aT REAL,
+                state_norm REAL,
                 state_vector BLOB
             )
         """)
         self.conn.commit()
-    
-    def _persist(self, step: int, T: float, aT: float, gate: bool):
-        V = self.pot.V(self.state.q)
-        K = self.state.K()
-        H = K + V
-        state_blob = self.state.q.astype(np.float64).tobytes()
-        
-        self.cursor.execute(
+
+    def persist(self, step, T, V, K, H, gate, violations, aT, state):
+        blob = state.astype(np.float64).tobytes()
+        self.conn.execute(
             """INSERT INTO telemetry
                (step, timestamp, temperature, potential, kinetic, hamiltonian,
-                gate, violations, aT, state_norm, state_vector)
+                gate_pass, topo_violations, aT, state_norm, state_vector)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                step, time.time(), T, float(V), float(K), float(H),
-                int(gate), self.state.violations, float(aT),
-                float(np.linalg.norm(self.state.q)), state_blob,
-            )
+            (step, time.time(), T, V, K, H, int(gate), violations, aT,
+             float(np.linalg.norm(state)), blob)
         )
         self.conn.commit()
-    
-    def _shutdown(self, signum, frame):
-        print("\n[SHUTDOWN] Signal received. Closing SQLite.")
+
+    def close(self):
         self.conn.close()
+
+# ---------------------------------------------------------------------------
+# INTEGRATOR: Velocity Verlet
+# ---------------------------------------------------------------------------
+class VerletIntegrator:
+    def __init__(self, mass, dt, potential):
+        self.m = mass
+        self.dt = dt
+        self.V = potential
+
+    def step(self, x, p):
+        F = -self.V.grad(x)
+        p_half = p + 0.5 * self.dt * F
+        x_new = x + (p_half / self.m) * self.dt
+        F_new = -self.V.grad(x_new)
+        p_new = p_half + 0.5 * self.dt * F_new
+        return x_new, p_new
+
+# ---------------------------------------------------------------------------
+# SOVEREIGN KERNEL
+# ---------------------------------------------------------------------------
+class SovereignKernel:
+    def __init__(self):
+        self.thermal = ThermalBinding()
+        self.potential = Potential(TRUTH)
+        self.topo = TopologyChecker()
+        self.gate = ThermodynamicGate()
+        self.telemetry = Telemetry(DB_PATH)
+        self.integrator = VerletIntegrator(MASS, DT, self.potential)
+
+        self.x = np.random.randn(DIM).astype(np.float64)
+        self.p = np.zeros(DIM, dtype=np.float64)
+        self.V_old = self.potential.value(self.x)
+        self.x_old = None
+
+        self.steps = 0
+        self.commits = 0
+        self.rejects = 0
+        self.atomic_reduction = False
+
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        print(f"\n[Signal] Caught {signum}. ATOMIC_REDUCTION flush...")
+        self._persist()
+        self.telemetry.close()
         sys.exit(0)
-    
-    def run(self):
-        print("=" * 50)
-        print("SOVEREIGN CONTROL PLANE v0.1.2")
-        print(f"DB: {self.cfg.db_path}")
-        print("=" * 50)
-        
-        for i in range(self.cfg.max_steps):
-            aT, dG, gate, T = self.thermo.compute()
-            
-            if T >= self.cfg.temp_critical:
-                print(f"\n[ATOMIC_REDUCTION] T={T:.2f}°C — logic frozen")
-                self._persist(i, T, aT, gate)
-                break
-            
-            force = -self.pot.grad(self.state.q)
-            
-            if not self.state.check_topology():
-                print(f"\n[VERITAS] Topology breach at step {i} — recovering")
-                self.state.p *= 0.5
-                continue
-            
-            self.integrator.step(self.state, force, gate, aT)
-            
-            self.Vs.append(self.pot.V(self.state.q))
-            self.Ks.append(self.state.K())
-            self.Ts.append(T)
-            self.gates.append(gate)
-            
-            if i % self.cfg.persist_every == 0:
-                self._persist(i, T, aT, gate)
-            
-            if i % self.cfg.log_interval == 0:
-                H = self.Ks[-1] + self.Vs[-1]
-                s = "COMMIT" if gate else "REJECT"
-                print(f"Step {i:04d} | T={T:5.2f}°C | a={aT:.4f} | "
-                      f"H={H:8.4f} | V={self.Vs[-1]:8.4f} | {s}")
-            
-            if np.linalg.norm(self.state.q - self.pot.truth) < 1e-3:
-                print(f"\n[CONVERGED] Truth reached at step {i}")
-                self._persist(i, T, aT, gate)
-                break
-        
-        self._persist(self.state.step, T, aT, gate)
-        
-        print("=" * 50)
-        print(f"Steps: {self.state.step} | Commits: {self.thermo.commits} | "
-              f"Rejects: {self.thermo.rejects} | Topo violations: {self.state.violations}")
-        print(f"Final V: {self.Vs[-1]:.6f} | Dist to truth: "
-              f"{np.linalg.norm(self.state.q - self.pot.truth):.6f}")
-        print(f"Telemetry rows: {self.cursor.execute('SELECT COUNT(*) FROM telemetry').fetchone()[0]}")
-        print("=" * 50)
-        
-        self.conn.close()
-        
-        return {
-            "V": np.array(self.Vs),
-            "K": np.array(self.Ks),
-            "T": np.array(self.Ts),
-            "gates": np.array(self.gates),
-        }
 
-# ─── ASCII PLOTTER ────────────────────────────────────────────────────────
-
-def plot(y, title, w=50, h=8):
-    if len(y) == 0:
-        return
-    mn, mx = y.min(), y.max()
-    if mx == mn:
-        mx += 1
-    print(f"\n{title}")
-    print("-" * w)
-    for row in range(h):
-        thr = mx - (row + 0.5) * (mx - mn) / h
-        line = "".join(
-            "*" if y[i] >= thr else " "
-            for i in range(0, len(y), max(1, len(y) // w))
+    def _persist(self):
+        K = 0.5 * np.dot(self.p, self.p) / MASS
+        H = self.V_old + K
+        T = self.thermal.read()
+        aT = math.exp(-ETA_THERMAL * (T - TEMP_NOMINAL)) if T < TEMP_CRITICAL else 0.0
+        self.telemetry.persist(
+            self.steps, T, self.V_old, K, H, True,
+            self.topo.total_violations, aT, self.x
         )
-        print(line)
-    print("-" * w)
 
-# ─── MAIN ───────────────────────────────────────────────────────────────
+    def _thermal_collapse(self, T):
+        if T >= TEMP_CRITICAL:
+            print(f"[ATOMIC_REDUCTION] T={T:.2f}°C ≥ {TEMP_CRITICAL}°C. HALT.")
+            self.atomic_reduction = True
+            return 0.0
+        aT = math.exp(-ETA_THERMAL * (T - TEMP_NOMINAL))
+        return aT
 
+    def run(self):
+        print("=" * 60)
+        print("SOVEREIGN SUITE v0.2.0")
+        print("Symplectic logic manifold | Thermodynamic gate | Topology bound")
+        print("=" * 60)
+        print(f"Truth target: {TRUTH}")
+        print(f"Initial state: {self.x}")
+        print(f"Initial V: {self.V_old:.6f}")
+        print(f"Topology tolerance: {TOPO_TOLERANCE} | Sample every: {TOPO_SAMPLE_EVERY}")
+        print(f"Cooling threshold: {COOLING_THRESHOLD}")
+        print("-" * 60)
+
+        for loop_idx in range(MAX_STEPS):
+            if self.atomic_reduction:
+                break
+
+            T = self.thermal.read()
+            aT = self._thermal_collapse(T)
+            if self.atomic_reduction:
+                break
+
+            x_prop, p_prop = self.integrator.step(self.x, self.p)
+            V_prop = self.potential.value(x_prop)
+
+            gate_open, dG, dH, dS = self.gate.evaluate(V_prop, self.V_old, x_prop, self.x, T)
+
+            if not gate_open:
+                self.rejects += 1
+                self.p *= 0.3
+                continue
+
+            topo_result = self.topo.check(x_prop, V_prop)
+
+            if topo_result == "COOLING":
+                self.x = self.x + np.random.normal(0, COOLING_PERTURBATION, DIM)
+                self.p = np.zeros(DIM, dtype=np.float64)
+                self.V_old = self.potential.value(self.x)
+                self.x_old = None
+                self.gate.reset()
+                self.rejects += 1
+                continue
+            elif not topo_result:
+                self.rejects += 1
+                self.p *= 0.3
+                continue
+
+            self.p = p_prop * aT * (1.0 - FRICTION)
+            self.x = x_prop
+            self.V_old = V_prop
+            self.x_old = self.x.copy()
+            self.steps += 1
+            self.commits += 1
+
+            dist = np.linalg.norm(self.x - TRUTH)
+            if self.steps % 100 == 0 or dist < 0.01:
+                K = 0.5 * np.dot(self.p, self.p) / MASS
+                H = self.V_old + K
+                print(f"Step {self.steps:4d} | T={T:.1f}°C | aT={aT:.4f} | "
+                      f"V={self.V_old:.6f} | K={K:.6f} | H={H:.6f} | "
+                      f"dist={dist:.6f} | breaches={self.topo.total_violations}")
+
+            if dist < 1e-4 and self.V_old < 1e-6:
+                print(f"\n[CONVERGED] Truth reached at step {self.steps}")
+                print(f"Final V: {self.V_old:.6f} | Dist to truth: {dist:.6f}")
+                break
+
+        self._persist()
+        self.telemetry.close()
+
+        print("-" * 60)
+        print(f"Steps: {self.steps} | Commits: {self.commits} | Rejects: {self.rejects}")
+        print(f"Topo violations: {self.topo.total_violations}")
+        print(f"Final V: {self.V_old:.6f} | Dist to truth: {np.linalg.norm(self.x - TRUTH):.6f}")
+
+        conn = sqlite3.connect(str(DB_PATH))
+        n_rows = conn.execute("SELECT COUNT(*) FROM telemetry").fetchone()[0]
+        conn.close()
+        print(f"Telemetry rows: {n_rows}")
+
+# ---------------------------------------------------------------------------
+# ENTRY POINT
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    dim = int(sys.argv[1]) if len(sys.argv) > 1 else 64
-    cfg = Config(dim=dim, max_steps=2000, log_interval=100)
-    core = SovereignCore(cfg)
-    m = core.run()
-    
-    plot(m["V"][:500], "Potential V(X)")
-    plot(m["T"], "Temperature T(t)")
-    plot(m["K"][:500], "Kinetic Energy K(t)")
+    kernel = SovereignKernel()
+    kernel.run()
