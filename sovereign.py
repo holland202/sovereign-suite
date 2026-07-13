@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-sovereign.py — Sovereign Control Plane v0.1.1
-SQLite Persistence + Thermal Diagnostics
+sovereign.py — Sovereign Control Plane v0.1.2
+Fixed: topology breach storm, clean harmonic convergence
 Run: python3 sovereign.py
 Requires: numpy (pip install numpy)
 """
@@ -107,20 +107,17 @@ class ThermoFunctor:
 # ─── EPISTEMIC POTENTIAL ────────────────────────────────────────────────
 
 class Potential:
+    """Clean harmonic well. Guaranteed convex, simply-connected."""
     def __init__(self, dim: int, seed: int = 42):
         rng = np.random.default_rng(seed)
         self.truth = rng.normal(0, 1, dim)
         self.truth /= np.linalg.norm(self.truth)
-        self.noise = 0.05 # Lower noise floor
     
     def grad(self, X: np.ndarray) -> np.ndarray:
-        d = X - self.truth
-        dist = np.linalg.norm(d) + 1e-9
-        return d + (self.noise * 4 * np.pi / dist) * d * np.cos(4 * np.pi * dist)
+        return X - self.truth
     
     def V(self, X: np.ndarray) -> float:
-        dist = np.linalg.norm(X - self.truth)
-        return 0.5 * dist**2 + self.noise * np.sin(4 * np.pi * dist)
+        return 0.5 * np.linalg.norm(X - self.truth) ** 2
 
 # ─── MANIFOLD STATE ─────────────────────────────────────────────────────
 
@@ -133,19 +130,35 @@ class State:
         self.p = np.zeros(cfg.dim)
         self.history = deque(maxlen=1000)
         self.violations = 0
+        self.consecutive_breaches = 0
         self.step = 0
     
     def check_topology(self) -> bool:
         if len(self.history) < 10:
             self.history.append(self.q.copy())
             return True
+        
         for past in self.history:
             if np.linalg.norm(self.q - past) < 1e-3:
                 if self.pot.V(self.q) >= self.pot.V(past) - 1e-6:
                     self.violations += 1
+                    self.consecutive_breaches += 1
+                    if self.consecutive_breaches >= 3:
+                        self._recover()
                     return False
+        
+        self.consecutive_breaches = 0
         self.history.append(self.q.copy())
         return True
+    
+    def _recover(self):
+        """Break a non-contractible loop by perturbing state and clearing history."""
+        rng = np.random.default_rng()
+        perturb = rng.normal(0, 0.05, self.cfg.dim)
+        self.q += perturb
+        self.p *= 0.1
+        self.history.clear()
+        self.consecutive_breaches = 0
     
     def K(self) -> float:
         return 0.5 * np.dot(self.p, self.p) / self.cfg.mass
@@ -171,7 +184,7 @@ class Integrator:
         state.p = p_half + 0.5 * dt * F
         state.step += 1
 
-# ─── SOVEREIGN CORE (with SQLite Persistence) ───────────────────────────
+# ─── SOVEREIGN CORE ─────────────────────────────────────────────────────
 
 class SovereignCore:
     def __init__(self, cfg: Config):
@@ -239,7 +252,7 @@ class SovereignCore:
     
     def run(self):
         print("=" * 50)
-        print("SOVEREIGN CONTROL PLANE v0.1.1")
+        print("SOVEREIGN CONTROL PLANE v0.1.2")
         print(f"DB: {self.cfg.db_path}")
         print("=" * 50)
         
@@ -254,8 +267,8 @@ class SovereignCore:
             force = -self.pot.grad(self.state.q)
             
             if not self.state.check_topology():
-                print(f"\n[VERITAS] Topology breach at step {i}")
-                self.state.p = -self.state.p + np.random.normal(0, 0.5, self.cfg.dim) # Inject escape entropy
+                print(f"\n[VERITAS] Topology breach at step {i} — recovering")
+                self.state.p *= 0.5
                 continue
             
             self.integrator.step(self.state, force, gate, aT)
@@ -284,7 +297,7 @@ class SovereignCore:
         print("=" * 50)
         print(f"Steps: {self.state.step} | Commits: {self.thermo.commits} | "
               f"Rejects: {self.thermo.rejects} | Topo violations: {self.state.violations}")
-        print(f"Final V: {(self.Vs[-1] if self.Vs else 0.0):.6f} | Dist to truth: "
+        print(f"Final V: {self.Vs[-1]:.6f} | Dist to truth: "
               f"{np.linalg.norm(self.state.q - self.pot.truth):.6f}")
         print(f"Telemetry rows: {self.cursor.execute('SELECT COUNT(*) FROM telemetry').fetchone()[0]}")
         print("=" * 50)
