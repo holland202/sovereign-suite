@@ -1,99 +1,85 @@
-# Sovereign Suite v0.2.1
+# Sovereign Suite
 
-Deterministic, physics-grounded AI control plane running locally on Snapdragon 8 Elite (Samsung Galaxy S25 Ultra via Termux).
-
-> **Core principle:** The system does not "predict" tokens; it computes minimum-energy trajectories through a continuous logic manifold bounded by thermodynamics and topology.
-
----
+A deterministic, physics-grounded AI control plane that runs locally on Snapdragon 8 Elite (Samsung Galaxy S25 Ultra via Termux). The system does not predict tokens; it computes minimum-energy trajectories through a continuous logic manifold bounded by thermodynamics and topology.
 
 ## Core Equation
 
 ```
-d/dt(m Ẋ) = -∇V(X) · 1_{ΔH < 0} · a(T)
+d/dt(m Ẋ) = -∇V(X) · 1_{ΔG < 0} · a(T)
 ```
 
 Where:
 - **-∇V(X)** pulls logic toward verified truth (harmonic well)
-- **1_{ΔH < 0}** is the thermodynamic gate — state only commits if potential energy strictly decreases
-- **a(T)** is the thermal telemetry factor — displays thermal stress, does not scale momentum
-
----
+- **1_{ΔG < 0}** is the thermodynamic gate — state only commits if Gibbs free energy decreases
+- **a(T)** is the thermal collapse factor — compute velocity scales with hardware temperature
 
 ## Quick Start (Termux)
 
 ```bash
+# Install numpy
 pip install numpy
+
+# Run the sovereign control plane
 python3 sovereign.py
-```
 
-Expected clean convergence:
+# Or with custom dimensionality
+python3 sovereign.py 128
 ```
-[CONVERGED] Truth reached at step ~320
-Final V: 0.000000 | Dist to truth: 0.000031
-Telemetry rows: 2
-```
-
----
 
 ## Architecture
 
 | Component | Role | File |
 |-----------|------|------|
-| **Damped Verlet Integrator** | 2nd-order symplectic with physical damping γ=0.05 | `sovereign.py` |
-| **Thermal Monitor** | Reads Android thermal sysfs (68 zones on S25 Ultra); falls back to simulation | `sovereign.py` |
-| **Thermodynamic Gate** | Strict ΔH < 0 criterion; ΔG computed for telemetry only | `sovereign.py` |
-| **Epistemic Potential** | Harmonic well V(X) = ½‖X - truth‖², noise-free | `sovereign.py` |
-| **Topology Checker** | Sampled every 5 steps; cooling reset after 10 breaches | `sovereign.py` |
-| **SQLite Persistence** | File-first memory; BLOB state vectors | `sovereign.py` |
-
----
-
-## Bug Fix History
-
-### v0.1.1 → v0.2.0
-- **Topology breach storm**: Removed `sin(4πr)` noise from gradient
-- **Gate accepted uphill steps**: Enforced strict `ΔH < 0` criterion
-- **Loop counter inflation**: Steps only increment on commits
-- **Topology checker storm**: Sample every 5 steps + cooling reset
-
-### v0.2.0 → v0.2.1
-- **Thermal cold-amplification**: `exp(-η(T-38.5))` gave `aT=35×` at `T=15°C`, causing kinetic energy to explode to ~8000. Fixed by removing thermal scaling from momentum entirely. `aT` is now telemetry-only.
-- **Slow convergence at cold temps**: Replaced post-step friction with physical damping `γ=0.05` in the Verlet force term. Converges in ~320 steps at all temperatures below 42°C.
-
----
-
-## Verified Behavior
-
-| Temperature | aT (telemetry) | Convergence | Breaches |
-|-------------|----------------|-------------|----------|
-| 15°C | 1.000 | ~320 steps | 0 |
-| 25°C | 1.000 | ~320 steps | 0 |
-| 38.5°C | 1.000 | ~320 steps | 0 |
-| 41.5°C | 0.638 | ~320 steps | 0 |
-| ≥42°C | 0.000 | ATOMIC_REDUCTION | — |
-
----
+| **Symplectic Integrator** | Velocity Verlet (2nd order), prevents energy drift | `sovereign.py` |
+| **Thermal Monitor** | Reads Android thermal sysfs; falls back to simulation | `sovereign.py` |
+| **Thermodynamic Functor** | Computes ΔG = ΔH - TΔS; gates state commits | `sovereign.py` |
+| **Epistemic Potential** | Harmonic well V(X) = ½‖X - truth‖² | `sovereign.py` |
+| **Manifold State** | Tracks X(t), enforces β₁ = β₂ = 0 (no logic holes) | `sovereign.py` |
+| **SQLite Persistence** | File-first memory; BLOB state vectors every 10 steps | `sovereign.py` |
 
 ## Telemetry
 
+After running, query the SQLite database:
+
 ```bash
-sqlite3 sovereign_telemetry.db "SELECT step, temperature, potential, aT, violations FROM telemetry LIMIT 5;"
+sqlite3 sovereign_telemetry.db "SELECT step, temperature, potential, violations FROM telemetry LIMIT 5;"
 ```
 
----
+Reconstruct a state vector:
+
+```bash
+python3 -c "
+import sqlite3, numpy as np
+conn = sqlite3.connect("sovereign_telemetry.db")
+c = conn.cursor()
+c.execute('SELECT step, state_vector FROM telemetry WHERE step=100')
+row = c.fetchone()
+if row:
+    vec = np.frombuffer(row[1], dtype=np.float64)
+    print(f"Step {row[0]}: norm={np.linalg.norm(vec):.4f}, dim={len(vec)}")
+"
+```
+
+## Thermal Binding
+
+The system reads hardware temperature from `/sys/class/thermal/thermal_zone*/temp`. On the S25 Ultra, this binds to the `aoss-0` sensor. If temperature exceeds 42°C, the **ATOMIC_REDUCTION** protocol triggers: logic freezes, SQLite flushes, and the process protects the silicon.
+
+## Topology Enforcement
+
+The **Veritas Constraint** enforces β₁ = β₂ = 0 (simply connected manifold). The system detects if the state trajectory forms a non-contractible loop — a mathematical definition of hallucination. After 3 consecutive breaches, the state auto-recovers via orthogonal perturbation.
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `sovereign.py` | Main control plane (v0.2.1) |
-| `sovereign_dashboard.py` | ANSI terminal dashboard |
-| `dashboard.html` | Browser-based Canvas dashboard |
-| `export_telemetry.py` | SQLite-to-JSON exporter |
-| `kernel_verify.py` | SHA-256 intrinsic verification |
+| `sovereign.py` | Main control plane (v0.2.0) |
+| `sovereign_dashboard.py` | ANSI terminal dashboard (real-time telemetry) |
+| `dashboard.html` | Browser-based Canvas dashboard with live charts |
+| `export_telemetry.py` | SQLite-to-JSON exporter for HTML dashboard |
+| `kernel_verify.py` | SHA-256 intrinsic verification gate for binary auditing |
 | `polytope_explorer.html` | 4D quantum polytope explorer (Three.js) |
-
----
+| `verify_polytopes.py` | Coordinate verification for 24-cell, 600-cell, 120-cell |
+| `verify_quantum_claims.py` | Quantum group annotation verification |
 
 ## Hardware
 
@@ -101,8 +87,6 @@ sqlite3 sovereign_telemetry.db "SELECT step, temperature, potential, aT, violati
 - **SoC:** Snapdragon 8 Elite
 - **RAM:** 12GB LPDDR5X
 - **OS:** Android 15 + Termux
-
----
 
 ## License
 
