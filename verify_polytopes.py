@@ -110,3 +110,5 @@ for name in ["5-cell","8-cell","16-cell","24-cell","600-cell"]:
 
 print("-"*62)
 print(f"{'ALL VERTEX/EDGE COUNTS CORRECT' if all_pass else 'MATH IS WRONG - STOP'}")
+import sys
+sys.exit(0 if all_pass else 1)
