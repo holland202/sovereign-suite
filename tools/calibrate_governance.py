@@ -686,9 +686,10 @@ class CalibrationRunner:
 
         print("\n  ── VERDICT ──")
         rule()
-        _print_verdict(s)
+        issues = _print_verdict(s)
         rule("═")
         print()
+        return issues
 
     def save_report(self, path):
         s = self.compute_summary()
@@ -849,7 +850,7 @@ class EngineLoopRunner:
         _fake.cryst_mem = type("_CM", (), {
             "state_summary": lambda s: self.compute_summary()["cryst_memory"]
         })()
-        CalibrationRunner.print_report(_fake)
+        return CalibrationRunner.print_report(_fake)
 
     def save_report(self, path):
         s = self.compute_summary()
@@ -866,6 +867,11 @@ class EngineLoopRunner:
 # ============================================================================
 
 def _print_verdict(s):
+    """Prints the verdict AND RETURNS the issues list.
+
+    Previously this computed `issues` correctly, printed them, and returned
+    None -- the verdict reached the terminal and nothing else. Loud Type A.
+    """
     issues = []; suggestions = []
     pg = s.get("pregate_pass_rate", 0)
     cg = s.get("commit_gate_accept_rate", 0)
@@ -908,6 +914,7 @@ def _print_verdict(s):
             print("\n  Suggested adjustments:")
             for sug in suggestions:
                 print(f"     → {sug}")
+    return issues
 
 
 def run_sweep(sic_dim, sic_rank, cycles_per_config=100):
@@ -969,13 +976,39 @@ def main():
     parser.add_argument("--live",         type=int, default=50,
                         help="Print live line every N cycles")
     parser.add_argument("--sweep",        action="store_true")
+    parser.add_argument("--advisory",     action="store_true",
+                        help="always exit 0 even when the verdict is UNHEALTHY "
+                             "(pre-2026-08-16 behaviour, for existing pipelines)")
+    parser.add_argument("--selftest",     action="store_true",
+                        help="prove the verdict gate returns BOTH directions")
+    parser.add_argument("--sabotage-verdict", action="store_true",
+                        help="force a synthetic UNHEALTHY verdict; proves the "
+                             "gate can fail")
     parser.add_argument("--out",          type=str, default=None)
     parser.add_argument("--log-file",     type=str, default=None, dest="log_file")
     args = parser.parse_args()
 
+    if args.selftest:
+        healthy = {"pregate_pass_rate": 0.70, "commit_gate_accept_rate": 0.70,
+                   "overall_crystallization_rate": 0.55, "avg_pressure": 0.20,
+                   "avg_variance_term": 0.30, "commit_fail_reasons": {}}
+        unhealthy = dict(healthy, pregate_pass_rate=0.99,
+                         overall_crystallization_rate=0.05)
+        print("  [selftest] healthy summary:")
+        h = _print_verdict(healthy)
+        print("  [selftest] unhealthy summary:")
+        u = _print_verdict(unhealthy)
+        ok = (h == [] and len(u) >= 2)
+        print(f"\n  healthy -> {len(h)} issue(s) (expect 0)")
+        print(f"  unhealthy -> {len(u)} issue(s) (expect >=2)")
+        print(f"  SELFTEST: {'PASS' if ok else 'FAIL'}")
+        return 0 if ok else 1
+
     if args.sweep:
         run_sweep(args.sic_dim, args.sic_rank, cycles_per_config=100)
-        return
+        print("  [sweep] exploratory mode: no verdict computed, "
+              "no health claim made. Exit 0.")
+        return 0
 
     thermal = ThermalMonitor()
     log_file = open(args.log_file, "w") if args.log_file else None
@@ -987,7 +1020,7 @@ def main():
         except ImportError:
             print(f"{ANSI_RED}[calibrate] core/engine.py not importable. "
                   f"Set PYTHONPATH or run from project root.{ANSI_RESET}")
-            sys.exit(1)
+            sys.exit(2)   # 2 = instrument could not run, distinct from 1 = unhealthy
 
         try:
             from gguf_adapter import build_gguf_engine
@@ -1057,7 +1090,7 @@ def main():
     print(f"\n  Completed {args.cycles} cycles in {elapsed:.1f}s "
           f"({args.cycles / elapsed:.1f} cyc/s)\n")
 
-    runner.print_report()
+    issues = runner.print_report()
 
     out = args.out or f"calibration_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     runner.save_report(out)
@@ -1066,6 +1099,27 @@ def main():
         log_file.close()
         print(f"  Per-cycle log → {args.log_file}")
 
+    if args.sabotage_verdict:
+        issues = list(issues or []) + ["[SABOTAGE] synthetic issue injected"]
+        print(f"  {ANSI_RED}[SABOTAGE] one synthetic issue injected; "
+              f"gate must now fail.{ANSI_RESET}")
+
+    if issues is None:
+        print(f"  {ANSI_RED}GATE ERROR: no verdict was produced by this run. "
+              f"Exit 2.{ANSI_RESET}")
+        return 2
+
+    if issues:
+        if args.advisory:
+            print(f"  {len(issues)} issue(s); --advisory set, exiting 0 anyway.")
+            return 0
+        print(f"  {ANSI_RED}VERDICT: UNHEALTHY — {len(issues)} issue(s). "
+              f"Exit 1.{ANSI_RESET}")
+        return 1
+
+    print(f"  {ANSI_GREEN}VERDICT: HEALTHY — 0 issues. Exit 0.{ANSI_RESET}")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
