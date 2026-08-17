@@ -6,8 +6,11 @@ This checks the ONE claim that's cleanly checkable in code: that the 24-cell's
 24 vertices form a group under quaternion multiplication (the binary tetrahedral
 group 2T), which is the basis for the '1-qubit Clifford' correspondence.
 """
+import sys
 import numpy as np
 from itertools import permutations, product
+
+SABOTAGE = "--sabotage" in sys.argv  # drop one vertex; closure MUST then fail
 
 PHI = (1 + 5**0.5) / 2
 
@@ -28,6 +31,9 @@ V8 = all_perms_signs([1,0,0,0])                      # 8 unit quaternions (±1,�
 V16 = [np.array(p,float) for p in product([-0.5,0.5], repeat=4)]  # 16 half-integer
 verts = V8 + V16
 verts = [v/np.linalg.norm(v) for v in verts]
+if SABOTAGE:
+    verts = verts[:-1]
+    print("[SABOTAGE] one vertex removed — closure must now FAIL")
 print(f"24-cell: {len(verts)} vertices, all unit quaternions: "
       f"{all(abs(np.linalg.norm(v)-1)<1e-9 for v in verts)}")
 
@@ -61,6 +67,12 @@ for a in verts:
 print(f"Closed under quaternion multiplication ({checked} products checked): {closed}")
 print(f"=> The 24 vertices {'DO' if closed else 'DO NOT'} form the binary tetrahedral group 2T.")
 print()
+
+if not closed:
+    print("VERDICT: FAIL — closure did not hold. The 24-cell/2T annotation is NOT")
+    print("verified by this run and must not be stated. Exit 1.")
+    sys.exit(1)
+
 print("VERIFIED-TRUE annotations (established math, safe to state):")
 print("  - 24-cell vertices = binary tetrahedral group 2T (order 24)  [checked above]")
 print("  - 600-cell vertices = binary icosahedral group 2I (order 120) [same construction, known]")
@@ -69,3 +81,6 @@ print()
 print("HONEST FRAMING: these are beautiful classical group-theory facts about 4D")
 print("polytopes. Real mathematics. NOT a quantum computing tool, NOT novel, NOT")
 print("connected to any synthesis system. A correct visualizer with correct labels.")
+print()
+print("VERDICT: PASS — closure held over all 576 products. Exit 0.")
+sys.exit(0)
