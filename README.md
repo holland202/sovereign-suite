@@ -1,3 +1,14 @@
+> **ARCHIVED 2026-10-02 — read-only, kept for history.** Development moved to
+> [sovereign-evolution](https://github.com/holland202/sovereign-evolution) (governance and evidence accounting)
+> and [sovereign-veritas](https://github.com/holland202/sovereign-veritas) (the fail-closed Gate kernel).
+> Where this repo's parts went:
+> - `polytope_explorer.html` / `verify_polytopes.py` → [polytope-explorer](https://github.com/holland202/polytope-explorer)
+>   (byte-identical HTML; its verifier is newer and adds the 120-cell).
+> - `tools/` (Phase 2C real-hardware toolkit: `gguf_adapter.py`, `smoke_test_2c.py`, `calibrate_governance.py`,
+>   `engine_diagnostic_patch.py`) has **no other home** and stays here. Known open defect, unchanged:
+>   `calibrate_governance.py` has no verdict gate (always exits 0).
+> - `kernel_verify.py`, `verify_quantum_claims.py`, `sovereign.py`, `export_telemetry.py`, dashboards: here only.
+
 # Sovereign Suite
 
 A deterministic, physics-grounded AI control plane that runs locally on Snapdragon 8 Elite (Samsung Galaxy S25 Ultra via Termux). The system does not predict tokens; it computes minimum-energy trajectories through a continuous logic manifold bounded by thermodynamics and topology.
